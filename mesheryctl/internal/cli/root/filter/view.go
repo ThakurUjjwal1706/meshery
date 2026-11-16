@@ -104,7 +104,7 @@ mesheryctl filter view "filter name"
 			urlString = "api/filter/" + filter
 		} else {
 			// else search filter by name
-			urlString = "api/filter?search=" + url.QueryEscape(filter)
+			urlString = "api/filter?pagesize=10000&search=" + url.QueryEscape(filter)
 		}
 
 		var selectedFilter *models.MesheryFilter
@@ -124,12 +124,46 @@ mesheryctl filter view "filter name"
 			filterPage = page
 
 			if !filterViewFlagsProvided.ViewAllFlag {
-				if len(filterPage.Filters) == 0 {
+				matchedFilters := make([]*models.MesheryFilter, 0)
+				// 1. Exact whole-name match (prioritizing exact matches)
+				for _, f := range filterPage.Filters {
+					if f == nil {
+						continue
+					}
+					if f.Name == filter || utils.TrimFileExtension(f.Name) == filter {
+						matchedFilters = append(matchedFilters, f)
+					}
+				}
+				// 2. If no exact match, fall back to case-insensitive whole-name match
+				if len(matchedFilters) == 0 {
+					for _, f := range filterPage.Filters {
+						if f == nil {
+							continue
+						}
+						if strings.EqualFold(f.Name, filter) || strings.EqualFold(utils.TrimFileExtension(f.Name), filter) {
+							matchedFilters = append(matchedFilters, f)
+						}
+					}
+				}
+
+				if len(matchedFilters) == 0 {
 					utils.Log.Info(fmt.Sprintf("filter with name: %q not found", filter))
 					return nil
 				}
-				selectedFilter = page.Filters[0]
+
+				if len(matchedFilters) == 1 {
+					selectedFilter = matchedFilters[0]
+				} else {
+					selectedFilter, err = selectFilterPrompt(matchedFilters)
+					if err != nil {
+						return err
+					}
+				}
 			}
+		}
+
+		if selectedFilter == nil && !filterViewFlagsProvided.ViewAllFlag {
+			return nil
 		}
 
 		var data any
@@ -177,6 +211,35 @@ mesheryctl filter view "filter name"
 		)
 
 	},
+}
+
+var runSelectPrompt = utils.RunSelectPrompt
+
+func selectFilterPrompt(filters []*models.MesheryFilter) (*models.MesheryFilter, error) {
+	if len(filters) == 0 {
+		return nil, nil
+	}
+
+	filterOptions := make([]string, len(filters))
+	for i, f := range filters {
+		if f == nil {
+			filterOptions[i] = "N/A"
+			continue
+		}
+		idStr := utils.FormatUUID(f.ID, "N/A")
+		ownerStr := "unknown"
+		if f.Owner != nil && *f.Owner != "" {
+			ownerStr = *f.Owner
+		}
+		filterOptions[i] = fmt.Sprintf("ID: %s, Name: %s, Owner: %s", idStr, f.Name, ownerStr)
+	}
+
+	i, err := runSelectPrompt("Select a filter", filterOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return filters[i], nil
 }
 
 func init() {
